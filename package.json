@@ -1,0 +1,123 @@
+{
+	"name": "vue-tsgo-vscode",
+	"displayName": "Vue TSGo",
+	"description": "为 .vue <script setup lang=\"ts\"> 提供基于 tsgo 的定义查看（从悬浮开始）",
+	"version": "0.0.1",
+	"publisher": "local",
+	"private": true,
+	"engines": {
+		"vscode": "^1.88.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onLanguage:vue"
+	],
+	"main": "dist/extension.js",
+	"contributes": {
+		"languages": [
+			{
+				"id": "vue",
+				"extensions": [
+					".vue"
+				],
+				"configuration": "./language/vue-language-configuration.json"
+			}
+		],
+		"grammars": [
+			{
+				"language": "vue",
+				"scopeName": "source.vue",
+				"path": "./syntaxes/vue.tmLanguage.json"
+			},
+			{
+				"scopeName": "markdown.vue.codeblock",
+				"path": "./syntaxes/markdown-vue.json",
+				"injectTo": [
+					"text.html.markdown"
+				],
+				"embeddedLanguages": {
+					"source.vue": "vue"
+				}
+			},
+			{
+				"scopeName": "mdx.vue.codeblock",
+				"path": "./syntaxes/mdx-vue.json",
+				"injectTo": [
+					"source.mdx"
+				],
+				"embeddedLanguages": {
+					"source.vue": "vue"
+				}
+			},
+			{
+				"scopeName": "vue.directives",
+				"path": "./syntaxes/vue-directives.json",
+				"injectTo": [
+					"source.vue",
+					"text.html.markdown",
+					"text.html.derivative",
+					"text.pug"
+				]
+			},
+			{
+				"scopeName": "vue.interpolations",
+				"path": "./syntaxes/vue-interpolations.json",
+				"injectTo": [
+					"source.vue",
+					"text.html.markdown",
+					"text.html.derivative",
+					"text.pug"
+				]
+			},
+			{
+				"scopeName": "vue.sfc.style.variable.injection",
+				"path": "./syntaxes/vue-sfc-style-variable-injection.json",
+				"injectTo": [
+					"source.vue"
+				]
+			}
+		],
+		"commands": [
+			{
+				"command": "vueTsgo.restartServer",
+				"title": "Vue TSGo: 重启 tsgo 服务"
+			}
+		],
+		"configuration": {
+			"title": "Vue TSGo",
+			"properties": {
+				"vueTsgo.tsgoPath": {
+					"type": "string",
+					"default": "",
+					"description": "tsgo 可执行文件路径；为空则自动从工作区 node_modules/.bin/tsgo 或 PATH 中解析"
+				},
+				"vueTsgo.cacheDir": {
+					"type": "string",
+					"default": ".vue-tsgo/cache",
+					"description": "临时 TypeScript 文件输出目录，用于将 <script setup> 提取为虚拟 TS 文件"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"build": "tsup",
+		"watch": "tsup --watch",
+		"package": "vsce package"
+	},
+	"devDependencies": {
+		"@types/node": "^20.11.0",
+		"@types/vscode": "^1.88.0",
+		"tsup": "^8.0.1",
+		"typescript": "^5.5.0",
+		"vsce": "^2.15.0",
+		"vscode-languageclient": "^9.0.0"
+	},
+	"dependencies": {
+		"@typescript/native-preview": "7.0.0-dev.20250808.1",
+		"@volar/language-core": "^2.4.22",
+		"@volar/language-service": "^2.4.22",
+		"@vue/language-core": "^3.0.5"
+	}
+}

@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "pnpm build",
+      "group": "build",
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "playground:install",
+      "type": "shell",
+      "command": "cd playground && pnpm i",
+      "problemMatcher": []
+    },
+    {
+      "label": "open:playground:App.vue",
+      "type": "shell",
+      "command": "code ${workspaceFolder}/playground/src/App.vue",
+      "problemMatcher": []
+    }
+  ]
+}

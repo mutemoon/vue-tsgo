@@ -1,0 +1,10 @@
+node_modules/**
+!node_modules/.bin/**
+src/**
+pnpm-lock.yaml
+tsconfig.json
+README.md
+.git/**
+.gitignore
+.DS_Store
+

@@ -1,0 +1,49 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Vue",
+    "scopeName": "source.vue",
+    "patterns": [
+        {
+            "include": "#sfc"
+        }
+    ],
+    "repository": {
+        "sfc": {
+            "patterns": [
+                {
+                    "begin": "<template(\n|\r|.)*?>",
+                    "end": "</template>",
+                    "name": "meta.section.template.vue",
+                    "patterns": [
+                        {
+                            "include": "text.html.basic"
+                        }
+                    ]
+                },
+                {
+                    "begin": "<script(\n|\r|.)*?>",
+                    "end": "</script>",
+                    "name": "meta.section.script.vue",
+                    "patterns": [
+                        {
+                            "include": "source.ts"
+                        },
+                        {
+                            "include": "source.js"
+                        }
+                    ]
+                },
+                {
+                    "begin": "<style(\n|\r|.)*?>",
+                    "end": "</style>",
+                    "name": "meta.section.style.vue",
+                    "patterns": [
+                        {
+                            "include": "source.css"
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}
