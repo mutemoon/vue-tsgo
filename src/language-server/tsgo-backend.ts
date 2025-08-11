@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from "child_process";
-import { ConfigManager } from "../utils/config";
+import { ServerConfigManager } from "../utils/server-config";
 import { Logger } from "../utils/logger";
 
 /**
@@ -23,27 +23,68 @@ export class TsgoBackend {
   async start(): Promise<void> {
     Logger.log("启动 TSGo 后端服务");
 
-    const tsgoPath = await ConfigManager.getTsgoPath();
-    const serverCwd = ConfigManager.pickServerCwd();
+    try {
+      const tsgoPath = await ServerConfigManager.getTsgoPath();
+      const serverCwd = ServerConfigManager.pickServerCwd();
 
-    Logger.debug("TSGo 配置", { tsgoPath, serverCwd });
+      Logger.debug("TSGo 配置", { tsgoPath, serverCwd });
 
-    this.tsgoProcess = spawn(tsgoPath, ["--lsp", "--stdio"], {
-      cwd: serverCwd,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+      this.tsgoProcess = spawn(tsgoPath, ["--lsp", "--stdio"], {
+        cwd: serverCwd,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
 
-    if (!this.tsgoProcess.stdin || !this.tsgoProcess.stdout) {
-      throw new Error("无法创建 TSGo 进程的输入输出流");
+      if (!this.tsgoProcess.stdin || !this.tsgoProcess.stdout) {
+        throw new Error("无法创建 TSGo 进程的输入输出流");
+      }
+
+      // 设置数据处理
+      this.setupProcessHandlers();
+
+      // 等待进程启动
+      await new Promise<void>((resolve, reject) => {
+        let resolved = false;
+
+        const onError = (error: Error) => {
+          if (!resolved) {
+            resolved = true;
+            Logger.error("TSGo 进程启动失败", error);
+            reject(new Error(`TSGo 进程启动失败: ${error.message}`));
+          }
+        };
+
+        const onExit = (code: number | null, signal: string | null) => {
+          if (!resolved) {
+            resolved = true;
+            const msg = `TSGo 进程异常退出: code=${code}, signal=${signal}`;
+            Logger.error(msg);
+            reject(new Error(msg));
+          }
+        };
+
+        this.tsgoProcess!.on("error", onError);
+        this.tsgoProcess!.on("exit", onExit);
+
+        // 给进程一些时间启动，如果没有立即出错，认为启动成功
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            this.tsgoProcess!.off("error", onError);
+            this.tsgoProcess!.off("exit", onExit);
+            resolve();
+          }
+        }, 1000);
+      });
+
+      // 初始化 LSP 连接
+      await this.initializeLsp();
+
+      Logger.log("TSGo 后端服务启动完成");
+    } catch (error) {
+      Logger.error("TSGo 后端服务启动失败", error);
+      // 不要重新抛出错误，让语言服务器继续运行，只是没有 TSGo 后端
+      Logger.warn("语言服务器将在没有 TSGo 后端的情况下继续运行");
     }
-
-    // 设置数据处理
-    this.setupProcessHandlers();
-
-    // 初始化 LSP 连接
-    await this.initializeLsp();
-
-    Logger.log("TSGo 后端服务启动完成");
   }
 
   /**
@@ -100,17 +141,24 @@ export class TsgoBackend {
    * 提供悬停信息
    */
   async provideHover(context: any, position: any): Promise<any> {
-    Logger.debug("TSGo 后端: 提供悬停", { context, position });
-
     try {
+      if (!context?.document) {
+        Logger.error("TSGo Hover: 缺少 document");
+        return null;
+      }
+
       await this.openDocument(context.document);
 
-      const result = await this.sendRequest("textDocument/hover", {
+      const params = {
         textDocument: { uri: context.document.uri },
         position: { line: position.line, character: position.character },
-      });
+      };
 
-      Logger.debug("TSGo 悬停结果:", result);
+      const result = await this.sendRequest("textDocument/hover", params);
+      Logger.debug("TSGo Hover 结果", {
+        uri: context.document.uri,
+        hasResult: !!result,
+      });
       return result;
     } catch (error) {
       Logger.error("TSGo 提供悬停失败:", error);

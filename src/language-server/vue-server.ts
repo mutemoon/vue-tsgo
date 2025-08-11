@@ -1,6 +1,9 @@
 import * as vscode from "vscode-languageserver/node";
 import { createConnection, createServer } from "@volar/language-server/node";
-import { createLanguageServiceEnvironment } from "@volar/language-server/lib/project/simpleProject";
+import {
+  createLanguageServiceEnvironment,
+  createSimpleProject,
+} from "@volar/language-server/lib/project/simpleProject";
 import {
   createLanguage,
   createParsedCommandLine,
@@ -16,6 +19,8 @@ import * as ts from "typescript";
 import { URI } from "vscode-uri";
 import { TsgoBackend } from "./tsgo-backend";
 import { Logger } from "../utils/logger";
+import { ServerConfigManager } from "../utils/server-config";
+import { createTsgoPluginClient } from "./tsgo-plugin-client";
 
 /**
  * Vue Language Server
@@ -28,9 +33,12 @@ export class VueLanguageServer {
   private tsconfigProjects = createUriMap<any>();
 
   constructor() {
-    this.connection = createConnection(process.stdin, process.stdout);
+    this.connection = createConnection();
     this.server = createServer(this.connection);
     this.tsgoBackend = new TsgoBackend();
+    try {
+      Logger.setServerConnection(this.server.connection);
+    } catch {}
   }
 
   /**
@@ -38,9 +46,6 @@ export class VueLanguageServer {
    */
   async start(): Promise<void> {
     Logger.log("启动 Vue Language Server");
-
-    // 启动 TSGo 后端
-    await this.tsgoBackend.start();
 
     // 设置连接监听
     this.setupConnectionHandlers();
@@ -56,47 +61,54 @@ export class VueLanguageServer {
     this.connection.onInitialize((params) => {
       Logger.log("Vue Language Server 初始化", params);
 
-      return this.server.initialize(params, {
-        setup() {
-          Logger.log("Vue Language Server 设置完成");
+      // 设置服务器端配置
+      const workspaceFolders =
+        params.workspaceFolders?.map(
+          (folder) => URI.parse(folder.uri).fsPath
+        ) || [];
+      ServerConfigManager.setWorkspaceFolders(workspaceFolders);
+
+      // 从初始化参数中获取配置
+      const config = params.initializationOptions?.config || {};
+      ServerConfigManager.setConfig(config);
+
+      const commandLine = createParsedCommandLineByJson(
+        ts,
+        ts.sys,
+        ts.sys.getCurrentDirectory(),
+        {}
+      );
+
+      const languagePlugins = [
+        {
+          getLanguageId: (uri: URI) =>
+            this.server.documents.get(uri)?.languageId,
         },
+        createVueLanguagePlugin(
+          ts,
+          commandLine.options,
+          commandLine.vueOptions,
+          (uri: URI) => uri.fsPath.replace(/\\/g, "/")
+        ),
+      ];
 
-        async getLanguageService(uri) {
-          Logger.debug("获取语言服务", { uri: uri.toString() });
+      const languageServicePlugins = this.createCustomLanguageServicePlugins();
 
-          if (uri.scheme === "file") {
-            const fileName = uri.fsPath.replace(/\\/g, "/");
-
-            // 获取项目信息（简化版，实际可能需要更复杂的项目发现逻辑）
-            const configFileName = this.findTsConfig(fileName);
-
-            let languageService = this.tsconfigProjects.get(
-              URI.file(configFileName || "")
-            );
-            if (!languageService) {
-              languageService =
-                this.createProjectLanguageService(configFileName);
-              this.tsconfigProjects.set(
-                URI.file(configFileName || ""),
-                languageService
-              );
-            }
-            return languageService;
-          }
-
-          // 默认语言服务
-          return this.createProjectLanguageService(undefined);
-        },
-
-        getExistingLanguageServices() {
-          return [...this.tsconfigProjects.values()];
-        },
-      });
+      return this.server.initialize(
+        params,
+        createSimpleProject(languagePlugins),
+        languageServicePlugins
+      );
     });
 
     this.connection.onInitialized(() => {
       Logger.log("Vue Language Server 初始化完成");
       this.server.initialized();
+      // 初始化完成后再启动 TSGo，避免阻塞 LSP 初始化握手
+      this.tsgoBackend
+        .start()
+        .then(() => Logger.log("TSGo 后端启动成功（post-initialized）"))
+        .catch((err) => Logger.error("TSGo 后端启动失败", err));
     });
 
     this.connection.onShutdown(() => {
@@ -166,55 +178,18 @@ export class VueLanguageServer {
    * 创建自定义语言服务插件，集成 TSGo 后端
    */
   private createCustomLanguageServicePlugins() {
-    const basePlugins = createVueLanguageServicePlugins(ts);
+    // 创建 TSGo 插件客户端，将 TypeScript 请求转发给 TSGo 后端
+    const tsgoPluginClient = createTsgoPluginClient(this.tsgoBackend);
 
-    // 在这里我们可以替换或包装 TypeScript 相关的插件
-    // 使它们使用 TSGo 后端而不是内置的 TypeScript 服务
-    return basePlugins.map((plugin) => {
-      if (plugin.name?.includes("typescript")) {
-        return this.wrapPluginWithTsgoBackend(plugin);
-      }
-      return plugin;
-    });
-  }
+    const basePlugins = createVueLanguageServicePlugins(ts, tsgoPluginClient);
+    try {
+      Logger.debug("加载基础语言服务插件", {
+        plugins: basePlugins.map((p: any) => p.name || "<anonymous>"),
+      });
+    } catch {}
 
-  /**
-   * 包装插件以使用 TSGo 后端
-   */
-  private wrapPluginWithTsgoBackend(plugin: any) {
-    return {
-      ...plugin,
-      // 在这里拦截 TypeScript 相关的请求并转发给 TSGo
-      async provideDefinition(context: any, pos: any) {
-        // 如果是 TypeScript 相关的定义请求，转发给 TSGo
-        if (this.isTypeScriptContext(context)) {
-          return await this.tsgoBackend.provideDefinition(context, pos);
-        }
-        // 否则使用原始插件
-        return plugin.provideDefinition?.(context, pos);
-      },
-
-      async provideHover(context: any, pos: any) {
-        if (this.isTypeScriptContext(context)) {
-          return await this.tsgoBackend.provideHover(context, pos);
-        }
-        return plugin.provideHover?.(context, pos);
-      },
-
-      // 可以继续包装其他 TypeScript 功能...
-    };
-  }
-
-  /**
-   * 判断是否为 TypeScript 上下文
-   */
-  private isTypeScriptContext(context: any): boolean {
-    // 这里需要实现逻辑来判断当前上下文是否需要 TypeScript 分析
-    // 例如：检查是否在 <script setup> 块中，或者是否为 .ts 虚拟代码
-    return (
-      context.document?.languageId === "typescript" ||
-      context.document?.uri?.toString().includes(".vue.setup.ts")
-    );
+    // 直接返回插件，它们已经通过 tsgoPluginClient 与 TSGo 后端集成
+    return basePlugins;
   }
 
   /**

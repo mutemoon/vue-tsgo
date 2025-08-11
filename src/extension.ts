@@ -3,6 +3,8 @@ import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
+  TransportKind,
+  State as ClientState,
 } from "vscode-languageclient/node";
 import { ConfigManager } from "./utils/config";
 import { Logger } from "./utils/logger";
@@ -52,11 +54,11 @@ async function startVueLanguageServer(
   const serverOptions: ServerOptions = {
     run: {
       module: serverModule,
-      transport: "ipc" as any,
+      transport: TransportKind.stdio,
     },
     debug: {
       module: serverModule,
-      transport: "ipc" as any,
+      transport: TransportKind.stdio,
       options: { execArgv: ["--nolazy", "--inspect=6009"] },
     },
   };
@@ -69,6 +71,29 @@ async function startVueLanguageServer(
       fileEvents: workspace.createFileSystemWatcher("**/*.{vue,ts,tsx,json}"),
     },
     outputChannel: window.createOutputChannel("Vue Language Server"),
+    revealOutputChannelOn: 4 as any, // RevealOutputChannelOn.Error
+    initializationOptions: {
+      config: {
+        tsgoPath: workspace.getConfiguration("vueTsgo").get<string>("tsgoPath"),
+        cacheDir: workspace.getConfiguration("vueTsgo").get<string>("cacheDir"),
+      },
+    },
+    middleware: {
+      provideHover: async (document, position, token, next) => {
+        try {
+          Logger.log("[Client] 提交 Hover 请求", {
+            uri: document.uri.toString(),
+            position,
+          });
+          const res = await next(document, position, token);
+          Logger.log("[Client] 收到 Hover 响应", res);
+          return res;
+        } catch (err) {
+          Logger.error("[Client] Hover 中间件异常", err);
+          throw err;
+        }
+      },
+    },
   };
 
   client = new LanguageClient(
@@ -78,9 +103,25 @@ async function startVueLanguageServer(
     clientOptions
   );
 
+  client.onDidChangeState((e) => {
+    Logger.log("[Client] LSP 状态变化", {
+      old: ClientState[e.oldState],
+      new: ClientState[e.newState],
+    } as any);
+  });
+
   // 启动客户端
   await client.start();
   Logger.log("Vue Language Server 已启动");
+
+  try {
+    // 尝试打开 LSP trace
+    (client as any).setTrace?.("messages"); // 降级避免过多同步调用
+    Logger.log("已启用 LSP Trace (messages)");
+    const output = client.outputChannel;
+    output.appendLine("[TSGO-DEBUG] Client trace: messages 已开启");
+    output.show(true);
+  } catch {}
 
   // 注册扩展命令
   registerCommands(context);
