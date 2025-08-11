@@ -82,7 +82,11 @@
 		"commands": [
 			{
 				"command": "vueTsgo.restartServer",
-				"title": "Vue TSGo: 重启 tsgo 服务"
+				"title": "Vue TSGo: 重启服务器"
+			},
+			{
+				"command": "vueTsgo.showServerStatus",
+				"title": "Vue TSGo: 显示服务器状态"
 			},
 			{
 				"command": "vueTsgo.clearVirtualDocs",
@@ -121,7 +125,10 @@
 	"dependencies": {
 		"@typescript/native-preview": "7.0.0-dev.20250808.1",
 		"@volar/language-core": "^2.4.22",
+		"@volar/language-server": "^2.4.23",
 		"@volar/language-service": "^2.4.22",
-		"@vue/language-core": "^3.0.5"
+		"@vue/language-core": "^3.0.5",
+		"@vue/language-service": "^3.0.5",
+		"vscode-languageserver": "^9.0.1"
 	}
 }
