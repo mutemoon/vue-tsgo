@@ -85,8 +85,8 @@
 				"title": "Vue TSGo: 重启 tsgo 服务"
 			},
 			{
-				"command": "vueTsgo.testVirtualFiles",
-				"title": "Vue TSGo: 🧪 测试虚拟文件支持"
+				"command": "vueTsgo.clearVirtualDocs",
+				"title": "Vue TSGo: 🧹 清理虚拟文档"
 			}
 		],
 		"configuration": {
