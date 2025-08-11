@@ -83,6 +83,10 @@
 			{
 				"command": "vueTsgo.restartServer",
 				"title": "Vue TSGo: 重启 tsgo 服务"
+			},
+			{
+				"command": "vueTsgo.testVirtualFiles",
+				"title": "Vue TSGo: 🧪 测试虚拟文件支持"
 			}
 		],
 		"configuration": {

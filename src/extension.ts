@@ -1,27 +1,24 @@
-import * as path from "path";
+import { createLanguageService } from "@volar/language-service";
 import * as fs from "fs/promises";
+import * as path from "path";
 import * as vscode from "vscode";
 import {
-  workspace,
-  ExtensionContext,
   commands,
-  window,
-  Position,
+  ExtensionContext,
   Hover,
   languages,
-  Uri,
-  LocationLink,
   Location,
+  Position,
+  Uri,
+  window,
+  workspace,
 } from "vscode";
 import {
   LanguageClient,
   LanguageClientOptions,
-  ServerOptions,
   Middleware,
+  ServerOptions,
 } from "vscode-languageclient/node";
-import { createLanguage } from "@vue/language-core";
-import { createLanguageService } from "@volar/language-service";
-import type { LanguageServiceContext } from "@volar/language-service";
 
 let client: LanguageClient | undefined;
 let extensionInstallPath: string | undefined;
@@ -104,25 +101,6 @@ async function getTsgoPath(): Promise<string> {
   return "tsgo";
 }
 
-async function ensureCacheDir(baseUri?: Uri): Promise<string> {
-  const cacheRel =
-    workspace.getConfiguration("vueTsgo").get<string>("cacheDir") ||
-    ".vue-tsgo/cache";
-  const baseFolder = baseUri
-    ? workspace.getWorkspaceFolder(baseUri)
-    : undefined;
-  const root =
-    baseFolder?.uri.fsPath ||
-    serverCwd ||
-    workspace.workspaceFolders?.[0]?.uri.fsPath ||
-    process.cwd();
-  const cacheDir = path.isAbsolute(cacheRel)
-    ? cacheRel
-    : path.join(root, cacheRel);
-  await fs.mkdir(cacheDir, { recursive: true });
-  return cacheDir;
-}
-
 function pickServerCwd(): string | undefined {
   const folders = workspace.workspaceFolders;
   if (!folders || folders.length === 0) return undefined;
@@ -141,14 +119,32 @@ function createClient(tsgoPath: string): LanguageClient {
   // 直接使用 Volar 的官方工具来处理虚拟文件映射，不再自己实现
   const middleware: Middleware = {
     async provideDefinition(document, position, token, next) {
+      console.log("[TSGO-DEBUG] 中间件 provideDefinition 开始", {
+        documentUri: document.uri,
+        position,
+        line: document
+          .lineAt(position.line)
+          .text.substring(
+            Math.max(0, position.character - 10),
+            position.character + 10
+          ),
+      });
+
       const result = await next(document, position, token);
-      if (!result || !volarLanguageService) return result;
+      console.log("[TSGO-DEBUG] LSP 返回结果:", result);
+
+      if (!result) {
+        console.log("[TSGO-DEBUG] 没有结果，直接返回");
+        return result;
+      }
 
       // 使用 Volar 的映射机制处理结果
       const locations = Array.isArray(result) ? result : [result];
       const mappedLocations: Location[] = [];
+      console.log("[TSGO-DEBUG] 处理", locations.length, "个位置");
 
-      for (const location of locations) {
+      for (let i = 0; i < locations.length; i++) {
+        const location = locations[i];
         let targetUri: Uri;
         let targetRange: vscode.Range;
 
@@ -159,24 +155,41 @@ function createClient(tsgoPath: string): LanguageClient {
               ? Uri.parse(location.targetUri)
               : location.targetUri;
           targetRange = toVsRange(location.targetRange);
+          console.log("[TSGO-DEBUG] LocationLink 类型", i, ":", {
+            targetUri: targetUri.toString(),
+            targetRange,
+            isVueSetupFile: /\.vue\.setup\.ts$/i.test(targetUri.fsPath),
+            isCacheFile: /[\\\/]\.vue-tsgo[\\\/]cache[\\\/]/.test(
+              targetUri.fsPath
+            ),
+          });
         } else {
           // Location 类型
           targetUri = location.uri;
           targetRange = location.range;
+          console.log("[TSGO-DEBUG] Location 类型", i, ":", {
+            uri: targetUri.toString(),
+            range: targetRange,
+            isVueSetupFile: /\.vue\.setup\.ts$/i.test(targetUri.fsPath),
+            isCacheFile: /[\\\/]\.vue-tsgo[\\\/]cache[\\\/]/.test(
+              targetUri.fsPath
+            ),
+          });
         }
 
-        // 使用 Volar 映射虚拟文件到源文件
-        const mapped = await mapVolarVirtualToSource(targetUri, targetRange);
-        if (mapped) {
-          mappedLocations.push(new Location(mapped.uri, mapped.range));
-        } else {
-          mappedLocations.push(new Location(targetUri, targetRange));
-        }
+        // 使用新的直接映射函数
+        const mappedUri = await directMapToVueFile(targetUri);
+        console.log("[TSGO-DEBUG] 映射结果", i, ":", mappedUri.toString());
+
+        mappedLocations.push(new Location(mappedUri, targetRange));
+        console.log("[TSGO-DEBUG] 使用映射后的位置:", mappedUri.toString());
       }
 
-      return Array.isArray(result)
+      const finalResult = Array.isArray(result)
         ? mappedLocations
         : mappedLocations[0] || null;
+      console.log("[TSGO-DEBUG] 最终返回结果:", finalResult);
+      return finalResult;
     },
   };
 
@@ -229,7 +242,6 @@ async function materializeVirtualTs(
   content: string
 ): Promise<{ tsUri: Uri; text: string; offsetDelta: number }> {
   const parsed = extractScriptSetup(content);
-  const baseName = path.basename(uri.fsPath).replace(/\.vue$/, "");
   const virtualPath = uri.path + ".setup.ts";
   const tsUri = Uri.from({ scheme: VIRTUAL_SCHEME, path: virtualPath });
   const header = "";
@@ -390,32 +402,104 @@ async function tryMapSetupFileToVue(
   }
 }
 
+// 直接映射虚拟文件到 Vue 文件的简单函数
+async function directMapToVueFile(uri: Uri): Promise<Uri> {
+  console.log("[TSGO-DEBUG] directMapToVueFile", uri.toString());
+
+  if (uri.scheme === VIRTUAL_SCHEME && /\.vue\.setup\.ts$/i.test(uri.path)) {
+    // 虚拟文件：从 path 提取 Vue 文件路径
+    const vueFilePath = uri.path.replace(/\.setup\.ts$/i, "");
+    const result = Uri.file(vueFilePath);
+    console.log("[TSGO-DEBUG] 映射虚拟文件到", result.toString());
+    return result;
+  }
+
+  if (uri.scheme === "file" && /\.vue\.setup\.ts$/i.test(uri.fsPath)) {
+    // 磁盘文件：从 fsPath 提取 Vue 文件路径
+    const vueFilePath = uri.fsPath.replace(/\.setup\.ts$/i, "");
+    const result = Uri.file(vueFilePath);
+    console.log("[TSGO-DEBUG] 映射磁盘文件到", result.toString());
+    return result;
+  }
+
+  if (
+    uri.scheme === "file" &&
+    /[\\\/]\.vue-tsgo[\\\/]cache[\\\/]/.test(uri.fsPath)
+  ) {
+    // 缓存文件：从文件名推断 Vue 文件
+    const fileName = path.basename(uri.fsPath);
+    if (fileName.endsWith(".vue.setup.ts")) {
+      const vueFileName = fileName.replace(".setup.ts", "");
+
+      try {
+        const vueFiles = await vscode.workspace.findFiles(
+          `**/${vueFileName}`,
+          "**/node_modules/**",
+          1
+        );
+        if (vueFiles.length > 0) {
+          console.log("[TSGO-DEBUG] 从缓存文件映射到", vueFiles[0].toString());
+          return vueFiles[0];
+        }
+      } catch (err) {
+        console.log("[TSGO-DEBUG] 搜索 Vue 文件失败", err);
+      }
+    }
+  }
+
+  // 如果不是虚拟文件，直接返回原 URI
+  return uri;
+}
+
 // 使用 Volar 的映射工具将虚拟文件映射回源文件
 async function mapVolarVirtualToSource(
   uri: Uri,
   range: vscode.Range
 ): Promise<{ uri: Uri; range: vscode.Range } | undefined> {
-  if (!volarLanguageService) return undefined;
+  console.log("[TSGO-DEBUG] mapVolarVirtualToSource 开始", {
+    uri: uri.toString(),
+    scheme: uri.scheme,
+    fsPath: uri.fsPath,
+    range,
+    volarLanguageServiceAvailable: !!volarLanguageService,
+  });
+
+  if (!volarLanguageService) {
+    console.log("[TSGO-DEBUG] volarLanguageService 不可用");
+    return undefined;
+  }
 
   // 如果已经是 Vue 文件，直接返回
   if (uri.path.endsWith(".vue")) {
+    console.log("[TSGO-DEBUG] 已经是 Vue 文件，直接返回");
     return { uri, range };
   }
 
   // 检查是否是我们的虚拟文件
-  if (
-    uri.scheme === VIRTUAL_SCHEME ||
-    /\.vue\.setup\.ts$/i.test(uri.fsPath) ||
-    /[\\\/]\.vue-tsgo[\\\/]cache[\\\/]/.test(uri.fsPath)
-  ) {
+  const isVirtualScheme = uri.scheme === VIRTUAL_SCHEME;
+  const isVueSetupFile = /\.vue\.setup\.ts$/i.test(uri.fsPath);
+  const isCacheFile = /[\\\/]\.vue-tsgo[\\\/]cache[\\\/]/.test(uri.fsPath);
+
+  console.log("[TSGO-DEBUG] 虚拟文件检查", {
+    isVirtualScheme,
+    isVueSetupFile,
+    isCacheFile,
+  });
+
+  if (isVirtualScheme || isVueSetupFile || isCacheFile) {
+    console.log("[TSGO-DEBUG] 检测到虚拟文件，尝试映射");
+
     // 尝试使用旧的映射方法作为回退
     const targetRange = {
       start: { line: range.start.line, character: range.start.character },
       end: { line: range.end.line, character: range.end.character },
     };
-    return await mapAnySetupToVue(uri, targetRange);
+    const result = await mapAnySetupToVue(uri, targetRange);
+    console.log("[TSGO-DEBUG] mapAnySetupToVue 结果", result);
+    return result;
   }
 
+  console.log("[TSGO-DEBUG] 不是虚拟文件，返回 undefined");
   return undefined;
 }
 
@@ -468,67 +552,13 @@ export async function activate(context: ExtensionContext) {
     )
   );
 
-  // 拦截 .vue.setup.ts 文件的打开，重定向到对应的 .vue 文件
-  context.subscriptions.push(
-    vscode.workspace.onDidOpenTextDocument(async (document) => {
-      const uri = document.uri;
-
-      // 检查是否是我们的虚拟 setup 文件
-      if (uri.scheme === "file" && /\.vue\.setup\.ts$/i.test(uri.fsPath)) {
-        // 推断对应的 Vue 文件
-        const vueFilePath = uri.fsPath.replace(/\.setup\.ts$/i, "");
-        const vueUri = Uri.file(vueFilePath);
-
-        try {
-          // 检查 Vue 文件是否存在
-          const vueStat = await vscode.workspace.fs.stat(vueUri);
-          if (vueStat.type === vscode.FileType.File) {
-            // 关闭当前的 setup 文件
-            await vscode.commands.executeCommand(
-              "workbench.action.closeActiveEditor"
-            );
-            // 打开对应的 Vue 文件
-            await vscode.window.showTextDocument(vueUri);
-            return;
-          }
-        } catch {
-          // Vue 文件不存在，继续处理
-        }
-      }
-
-      // 检查是否是缓存目录中的文件
-      if (
-        uri.scheme === "file" &&
-        /[\\\/]\.vue-tsgo[\\\/]cache[\\\/]/.test(uri.fsPath)
-      ) {
-        // 尝试从文件名推断源 Vue 文件
-        const fileName = path.basename(uri.fsPath);
-        if (fileName.endsWith(".vue.setup.ts")) {
-          const vueFileName = fileName.replace(".setup.ts", "");
-
-          // 在工作区中搜索对应的 Vue 文件
-          const vueFiles = await vscode.workspace.findFiles(
-            `**/${vueFileName}`,
-            "**/node_modules/**",
-            1
-          );
-          if (vueFiles.length > 0) {
-            // 关闭当前文件
-            await vscode.commands.executeCommand(
-              "workbench.action.closeActiveEditor"
-            );
-            // 打开 Vue 文件
-            await vscode.window.showTextDocument(vueFiles[0]);
-            return;
-          }
-        }
-      }
-    })
-  );
+  // 移除文档打开拦截器，改为在源头修复跳转链接
 
   // 注册跳转命令（用于 Hover 内的命令链接）
   context.subscriptions.push(
     commands.registerCommand("vueTsgo.openLocation", async (payload: any) => {
+      console.log("[TSGO-DEBUG] vueTsgo.openLocation 命令调用", payload);
+
       try {
         let uri =
           typeof payload?.uri === "string"
@@ -536,23 +566,26 @@ export async function activate(context: ExtensionContext) {
             : payload?.uri;
         let range = payload?.range ? toVsRange(payload.range) : undefined;
 
+        console.log("[TSGO-DEBUG] 原始跳转目标", {
+          uri: uri?.toString(),
+          range,
+        });
+
         if (uri) {
-          // 尝试映射虚拟文件到源文件
-          const mapped = await mapVolarVirtualToSource(
-            uri,
-            range || new vscode.Range(0, 0, 0, 0)
-          );
-          if (mapped) {
-            uri = mapped.uri;
-            range = mapped.range;
-          }
+          console.log("[TSGO-DEBUG] 最终跳转到", {
+            uri: uri.toString(),
+            range,
+          });
 
           await window.showTextDocument(
             uri,
             range ? { selection: range } : undefined
           );
+
+          console.log("[TSGO-DEBUG] 跳转完成");
         }
       } catch (err) {
+        console.log("[TSGO-DEBUG] 跳转失败", err);
         window.showErrorMessage(`打开定义失败: ${String(err)}`);
       }
     })
@@ -610,12 +643,16 @@ export async function activate(context: ExtensionContext) {
           let range = toVsRange(targetRange);
           let preview = "";
 
-          // 使用 Volar 的映射函数
-          const mappedLocation = await mapVolarVirtualToSource(target, range);
-          if (mappedLocation) {
-            target = mappedLocation.uri;
-            range = mappedLocation.range;
-          }
+          // 直接在源头修改跳转目标：如果目标是虚拟文件，直接指向对应的 Vue 文件
+          console.log("[TSGO-DEBUG] 原始跳转目标", {
+            uri: target.toString(),
+            scheme: target.scheme,
+            path: target.path,
+            fsPath: target.fsPath,
+          });
+
+          // 使用新的映射函数
+          target = await directMapToVueFile(target);
           const snippetDoc = await workspace.openTextDocument(target);
           preview = snippetDoc.getText(range).slice(0, 400);
           const md = new vscode.MarkdownString();
@@ -698,47 +735,21 @@ export async function activate(context: ExtensionContext) {
                   typeof it.targetUri === "string"
                     ? Uri.parse(it.targetUri)
                     : it.targetUri;
-                const mapped = await mapVolarVirtualToSource(
-                  targetUri,
-                  toVsRange(it.targetRange)
-                );
-                if (mapped) {
-                  return {
-                    originSelectionRange: it.originSelectionRange
-                      ? toVsRange(it.originSelectionRange)
-                      : undefined,
-                    targetUri: mapped.uri,
-                    targetRange: mapped.range,
-                    targetSelectionRange: it.targetSelectionRange
-                      ? toVsRange(it.targetSelectionRange)
-                      : mapped.range,
-                  } as vscode.LocationLink;
-                } else {
-                  return {
-                    originSelectionRange: it.originSelectionRange
-                      ? toVsRange(it.originSelectionRange)
-                      : undefined,
-                    targetUri: targetUri,
-                    targetRange: toVsRange(it.targetRange),
-                    targetSelectionRange: it.targetSelectionRange
-                      ? toVsRange(it.targetSelectionRange)
-                      : toVsRange(it.targetRange),
-                  } as vscode.LocationLink;
-                }
+                const mappedUri = await directMapToVueFile(targetUri);
+                return {
+                  originSelectionRange: it.originSelectionRange
+                    ? toVsRange(it.originSelectionRange)
+                    : undefined,
+                  targetUri: mappedUri,
+                  targetRange: toVsRange(it.targetRange),
+                  targetSelectionRange: it.targetSelectionRange
+                    ? toVsRange(it.targetSelectionRange)
+                    : toVsRange(it.targetRange),
+                } as vscode.LocationLink;
               } else {
                 // Location 类型
-                const mapped = await mapVolarVirtualToSource(
-                  Uri.parse(it.uri),
-                  toVsRange(it.range)
-                );
-                if (mapped) {
-                  return new vscode.Location(mapped.uri, mapped.range);
-                } else {
-                  return new vscode.Location(
-                    Uri.parse(it.uri),
-                    toVsRange(it.range)
-                  );
-                }
+                const mappedUri = await directMapToVueFile(Uri.parse(it.uri));
+                return new vscode.Location(mappedUri, toVsRange(it.range));
               }
             })
           );
